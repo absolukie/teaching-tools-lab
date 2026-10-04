@@ -63,6 +63,15 @@
   .cand:active{transform:scale(.95);}
   .cand.right{border-color:var(--green); background:var(--green-soft); color:var(--green);}
   .cand.wrong{border-color:var(--red); background:var(--red-soft); color:var(--red);}
+  .wbtns{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; justify-content:center;}
+  .wbtn{font-family:var(--sans); font-size:16px; font-weight:800; color:#14100a;
+    background:var(--accent); border:1px solid var(--accent); border-radius:12px; padding:12px 20px;
+    cursor:pointer; touch-action:manipulation; user-select:none; -webkit-user-select:none;}
+  .wbtn:active{transform:scale(.95);}
+  .wbtn.ghost{background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:600;}
+  .wbtn kbd{opacity:.55; font-size:12px; margin-left:6px;}
+  .autonext{color:var(--faint); font-size:13px; margin:10px 0 0; text-align:center;}
+  .best{color:var(--muted); font-size:14px; margin:8px 0 0; text-align:center;}
   .caption{text-align:center; color:var(--muted); font-size:14px; margin:14px 0 0;}
   .caption b{color:var(--ink);}
   .caption .rank{font-family:var(--mono); color:var(--accent);}
@@ -230,7 +239,7 @@
           <button class="btn btn-back pressable" id="r1a-back">← Back</button>
           <button class="btn btn-next pressable" id="r1a-next"><span id="r1a-nextlabel">Next pair</span><span class="arrow">→</span></button>
         </div>
-        <div class="hints"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> pick · <kbd>←</kbd><kbd>→</kbd> move</span><span id="r1a-count"></span></div>
+        <div class="hints"><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> pick · <kbd>←</kbd> back · <kbd>→</kbd> next</span><span id="r1a-count"></span></div>
         <div class="soundrow">
           <button class="switch on" id="r1-sound" role="switch" aria-checked="true" aria-label="Sound"></button>
           <span>Sound <span style="color:var(--faint)">— tiny synth, made in code</span></span>
@@ -253,7 +262,7 @@
           <button class="btn btn-back pressable" id="r1b-back">← Back</button>
           <button class="btn btn-next pressable" id="r1b-next"><span id="r1b-nextlabel">Next pair</span><span class="arrow">→</span></button>
         </div>
-        <div class="hints"><span>Tap two chips · <kbd>←</kbd><kbd>→</kbd> move</span><span id="r1b-count"></span></div>
+        <div class="hints"><span>Tap two chips · <kbd>←</kbd> back · <kbd>→</kbd> next</span><span id="r1b-count"></span></div>
       </div>
     </div>
   </section>
@@ -376,7 +385,7 @@ document.querySelectorAll('.seg').forEach(seg => {
     });
     $(''+room+'a').classList.toggle('hidden', b.dataset.v !== 'a');
     $(''+room+'b').classList.toggle('hidden', b.dataset.v !== 'b');
-    if(room === 'r1') stabilizeR1();
+    if(room === 'r1'){ clearQT(r1a); clearQT(r1b); stabilizeR1(); }
   });
 });
 
@@ -466,9 +475,49 @@ function pairInfo(w, r){
   return {pairs, correct, cands};
 }
 
-/* ---------- room 1 state ---------- */
-function freshR1(){ return {word:'token', round:0, phase:'ask', streak:0, sel:[], lastPick:null, _tryagain:false, _cands:null}; }
+/* ---------- room 1 state ----------
+   queue = round indices still to answer, in order; qi = position.
+   A wrong answer offers try-again (same question) or skip-for-later
+   (question moves to the end of the queue). Correct answers auto-advance. */
+function freshR1(){ return {word:'token', queue:[], qi:0, doneCount:0, best:0,
+  lastDone:null, reviewing:null, firstTry:true, phase:'ask',
+  streak:0, sel:[], lastPick:null, _cands:null, _timer:null}; }
 const r1a = freshR1(), r1b = freshR1();
+function initQuiz(s){
+  s.queue = WORDS[s.word].merges.map((_, i) => i);
+}
+function cur(s){ return s.queue[s.qi]; }
+function clearQT(s){ if(s._timer){ clearTimeout(s._timer); s._timer = null; } }
+function wrongPromptHTML(){
+  return '<p class="result bad">Not quite — no streak this time.</p>' +
+    '<div class="wbtns">' +
+    '<button class="wbtn pressable" data-w="retry">Try again<kbd>T</kbd></button>' +
+    '<button class="wbtn ghost pressable" data-w="skip">Skip for later<kbd>S</kbd></button>' +
+    '</div>';
+}
+function autoNext(s, v){
+  clearQT(s);
+  if(s.phase !== 'reveal') return;
+  s.qi++; s.firstTry = true; s.sel = []; s.lastPick = null;
+  s.phase = s.qi >= s.queue.length ? 'done' : 'ask';
+  if(s.phase === 'done') sfx.good();
+  (v === 'a' ? renderR1A : renderR1B)();
+}
+function tryAgain(s, v){
+  if(s.phase !== 'wrong') return;
+  clearQT(s);
+  s.phase = 'ask'; s.sel = []; s.lastPick = null;
+  if(v === 'a') s._cands = pairInfo(s.word, cur(s)).cands; /* fresh shuffle */
+  (v === 'a' ? renderR1A : renderR1B)();
+}
+function skipLater(s, v){
+  if(s.phase !== 'wrong') return;
+  clearQT(s);
+  s.queue.push(s.queue[s.qi]);
+  s.queue.splice(s.qi, 1);
+  s.phase = 'ask'; s.firstTry = true; s.sel = []; s.lastPick = null;
+  (v === 'a' ? renderR1A : renderR1B)();
+}
 
 function askCaption(w){
   const n = WORDS[w].rounds[0].length;
@@ -491,63 +540,94 @@ function mergedIdx(w, r){
 /* ---------- variant A · choices ---------- */
 function renderR1A(){
   const s = r1a, W = WORDS[s.word], total = W.merges.length;
-  const done = s.round >= total;
+  const done = s.phase === 'done';
   $('r1a-streak').textContent = s.streak;
   document.querySelectorAll('#r1a .wchip').forEach(b => b.classList.toggle('on', b.dataset.w === s.word));
 
   let chips, prompt, cap;
-  if(!done && s.phase === 'ask'){
-    chips = chipsHTML(W.rounds[s.round], -1, false, null);
-    const info = pairInfo(s.word, s.round);
+  const rv = s.reviewing;
+  if(rv != null){
+    chips = chipsHTML(W.rounds[rv+1], mergedIdx(s.word, rv), false, null);
+    prompt = '<p class="result">Reviewing — “' + esc(W.merges[rv].merged) + '”.</p>';
+    cap = W.merges[rv].note;
+  } else if(done){
+    chips = chipsHTML(W.rounds[total], -1, false, null);
+    const m = W.merges[total-1];
+    prompt = '<p class="result good">“' + esc(s.word) + '” is one token — id #' + m.rank.toLocaleString() + '.</p>' +
+             '<p class="best">Best streak: ' + s.best + '</p>';
+    cap = 'All ' + total + ' merges complete. Pick another word, or replay.';
+  } else if(s.phase === 'ask'){
+    const r = cur(s);
+    chips = chipsHTML(W.rounds[r], -1, false, null);
+    const info = pairInfo(s.word, r);
     s._cands = info.cands;
     prompt = '<p class="instr">Which pair merges next?</p>' +
       info.cands.map((c,i) => '<button class="cand pressable" data-ci="' + i + '"><span style="color:var(--faint);font-size:12px;margin-right:6px;">' + (i+1) + '</span>' + esc(c.label) + '</button>').join('');
     cap = askCaption(s.word);
-  } else {
-    const r = Math.min(s.round, total - 1), rr = done ? total - 1 : s.round;
-    chips = chipsHTML(W.rounds[rr+1], mergedIdx(s.word, rr), false, null);
-    const m = W.merges[rr];
-    if(s.lastPick && !done){
-      prompt = s.lastPick.correct
-        ? '<p class="result good">Correct — “' + esc(m.merged) + '” it is. Streak ' + s.streak + '.</p>'
-        : '<p class="result bad">Not quite — “' + esc(m.merged) + '” (rank #' + m.rank.toLocaleString() + ') merges next. Streak reset.</p>';
-    } else if(done){
-      prompt = '<p class="result good">“' + esc(s.word) + '” is one token — id #' + m.rank.toLocaleString() + '.</p>';
-    } else {
-      prompt = '<p class="result">“' + esc(m.merged) + '” merged.</p>';
-    }
-    cap = W.merges[rr].note;
+  } else if(s.phase === 'wrong'){
+    chips = chipsHTML(W.rounds[cur(s)], -1, false, null);
+    prompt = wrongPromptHTML();
+    cap = askCaption(s.word);
+  } else { /* reveal — correct, auto-advancing */
+    const r = cur(s), m = W.merges[r];
+    chips = chipsHTML(W.rounds[r+1], mergedIdx(s.word, r), false, null);
+    prompt = s.firstTry
+      ? '<p class="result good">Correct — “' + esc(m.merged) + '” it is. Streak ' + s.streak + '.</p>'
+      : '<p class="result good">Got it — “' + esc(m.merged) + '” merges.</p>';
+    prompt += '<p class="autonext">next question…</p>';
+    cap = m.note;
   }
   $('r1a-chips').innerHTML = chips;
   $('r1a-prompt').innerHTML = prompt;
   $('r1a-cap').innerHTML = cap;
-  $('r1a-fill').style.width = (Math.min(s.round + (s.phase==='done'?1:0), total) / total * 100) + '%';
-  $('r1a-count').textContent = Math.min(s.round + (s.phase==='done'?1:0), total) + ' / ' + total + ' merges';
-  $('r1a-nextlabel').textContent = done ? 'Replay' : (s.round === total - 1 && s.phase === 'done' ? 'Replay' : 'Next pair');
-  $('r1a-next').disabled = !done && s.phase === 'ask';
-  $('r1a-back').disabled = s.round === 0 && s.phase === 'ask';
+  $('r1a-fill').style.width = (s.doneCount / total * 100) + '%';
+  $('r1a-count').textContent = s.doneCount + ' / ' + total + ' merges';
+  const nx = $('r1a-next');
+  nx.style.visibility = (done && rv == null) ? 'visible' : 'hidden';
+  nx.disabled = !done;
+  $('r1a-nextlabel').textContent = 'Replay';
+  $('r1a-back').disabled = !((s.phase === 'ask' || done) && (rv != null || s.lastDone != null));
   $('r1a-prompt').querySelectorAll('.cand').forEach(b =>
     b.addEventListener('click', () => pickA(parseInt(b.dataset.ci, 10))));
+  $('r1a-prompt').querySelectorAll('.wbtn').forEach(b =>
+    b.addEventListener('click', () => b.dataset.w === 'retry' ? tryAgain(r1a, 'a') : skipLater(r1a, 'a')));
 }
 function pickA(ci){
   const s = r1a;
-  if(s.phase !== 'ask' || s.round >= WORDS[s.word].merges.length) return;
+  if(s.phase !== 'ask' || s.reviewing != null) return;
+  const r = cur(s);
+  if(r == null || r >= WORDS[s.word].merges.length) return;
+  clearQT(s);
   const c = s._cands[ci];
-  s.lastPick = {correct: c.correct, label: c.label};
-  if(c.correct){ s.streak++; sfx.good(); } else { s.streak = 0; sfx.bad(); }
-  s.phase = 'done';
-  sfx.merge();
-  renderR1A();
+  if(c.correct){
+    if(s.firstTry){ s.streak++; s.best = Math.max(s.best, s.streak); }
+    s.doneCount++; s.lastDone = r;
+    s.phase = 'reveal';
+    sfx.good(); setTimeout(() => sfx.merge(), 90);
+    renderR1A();
+    s._timer = setTimeout(() => autoNext(s, 'a'), 1800);
+  } else {
+    s.streak = 0; s.firstTry = false;
+    s.phase = 'wrong';
+    sfx.bad();
+    renderR1A();
+  }
 }
+/* Next now only replays a finished word — the quiz itself auto-advances. */
 function nextR1(s, v){
-  const total = WORDS[s.word].merges.length;
-  if(s.round >= total){ Object.assign(s, freshR1(), {word: s.word}); }
-  else if(s.phase === 'done'){ s.round++; s.phase = 'ask'; s.sel = []; s.lastPick = null; }
+  if(s.phase !== 'done') return;
+  clearQT(s);
+  const w = s.word;
+  Object.assign(s, freshR1(), {word: w});
+  initQuiz(s);
   (v === 'a' ? renderR1A : renderR1B)();
 }
+/* Back reviews the last answered question; press again to return. */
 function backR1(s, v){
-  if(s.phase === 'ask' && s.round > 0){ s.round--; s.phase = 'done'; s.sel = []; }
-  else if(s.phase === 'done'){ s.phase = 'ask'; s.sel = []; s.lastPick = null; }
+  if(s.phase !== 'ask' && s.phase !== 'done') return;
+  if(s.reviewing != null) s.reviewing = null;
+  else if(s.lastDone != null) s.reviewing = s.lastDone;
+  else return;
   (v === 'a' ? renderR1A : renderR1B)();
 }
 function bindPress(btn, onTap){
@@ -564,65 +644,93 @@ document.querySelectorAll('#r1a .wchip, #r1b .wchip').forEach(b =>
   b.addEventListener('click', () => {
     const v = b.closest('.variant').id === 'r1a' ? 'a' : 'b';
     const s = v === 'a' ? r1a : r1b;
+    clearQT(s);
     Object.assign(s, freshR1(), {word: b.dataset.w});
+    initQuiz(s);
     (v === 'a' ? renderR1A : renderR1B)();
   }));
 
 /* ---------- variant B · tap the pair ---------- */
 function renderR1B(){
   const s = r1b, W = WORDS[s.word], total = W.merges.length;
-  const done = s.round >= total;
+  const done = s.phase === 'done';
   $('r1b-streak').textContent = s.streak;
   document.querySelectorAll('#r1b .wchip').forEach(b => b.classList.toggle('on', b.dataset.w === s.word));
 
   let chips, prompt, cap;
-  if(!done && s.phase === 'ask'){
-    chips = chipsHTML(W.rounds[s.round], -1, true, s.sel);
-    prompt = s._tryagain
-      ? '<p class="result bad">Those two don’t merge yet — try again.</p>'
-      : '<p class="instr">' + (s.sel.length ? 'Now tap the chip beside it.' : 'Tap the two chips that merge next.') + '</p>';
+  const rv = s.reviewing;
+  if(rv != null){
+    chips = chipsHTML(W.rounds[rv+1], mergedIdx(s.word, rv), false, null);
+    prompt = '<p class="result">Reviewing — “' + esc(W.merges[rv].merged) + '”.</p>';
+    cap = W.merges[rv].note;
+  } else if(done){
+    chips = chipsHTML(W.rounds[total], -1, false, null);
+    const m = W.merges[total-1];
+    prompt = '<p class="result good">“' + esc(s.word) + '” is one token — id #' + m.rank.toLocaleString() + '.</p>' +
+             '<p class="best">Best streak: ' + s.best + '</p>';
+    cap = 'All ' + total + ' merges complete. Pick another word, or replay.';
+  } else if(s.phase === 'ask'){
+    const r = cur(s);
+    chips = chipsHTML(W.rounds[r], -1, true, s.sel);
+    prompt = '<p class="instr">' + (s.sel.length ? 'Now tap the chip beside it.' : 'Tap the two chips that merge next.') + '</p>';
     cap = askCaption(s.word);
-  } else {
-    const rr = done ? total - 1 : s.round;
-    chips = chipsHTML(W.rounds[rr+1], mergedIdx(s.word, rr), false, null);
-    const m = W.merges[rr];
-    prompt = done
-      ? '<p class="result good">“' + esc(s.word) + '” is one token — id #' + m.rank.toLocaleString() + '.</p>'
-      : '<p class="result good">“' + esc(m.merged) + '” — rank #' + m.rank.toLocaleString() + '. Streak ' + s.streak + '.</p>';
-    cap = W.merges[rr].note;
+  } else if(s.phase === 'wrong'){
+    chips = chipsHTML(W.rounds[cur(s)], -1, true, null);
+    prompt = wrongPromptHTML();
+    cap = askCaption(s.word);
+  } else { /* reveal — correct, auto-advancing */
+    const r = cur(s), m = W.merges[r];
+    chips = chipsHTML(W.rounds[r+1], mergedIdx(s.word, r), false, null);
+    prompt = s.firstTry
+      ? '<p class="result good">“' + esc(m.merged) + '” — rank #' + m.rank.toLocaleString() + '. Streak ' + s.streak + '.</p>'
+      : '<p class="result good">Got it — “' + esc(m.merged) + '” merges.</p>';
+    prompt += '<p class="autonext">next question…</p>';
+    cap = m.note;
   }
   const box = $('r1b-chips');
   box.innerHTML = chips;
   $('r1b-prompt').innerHTML = prompt;
   $('r1b-cap').innerHTML = cap;
-  $('r1b-fill').style.width = (Math.min(s.round + (s.phase==='done'?1:0), total) / total * 100) + '%';
-  $('r1b-count').textContent = Math.min(s.round + (s.phase==='done'?1:0), total) + ' / ' + total + ' merges';
-  $('r1b-nextlabel').textContent = done ? 'Replay' : 'Next pair';
-  $('r1b-next').disabled = !done && s.phase === 'ask';
-  $('r1b-back').disabled = s.round === 0 && s.phase === 'ask';
+  $('r1b-fill').style.width = (s.doneCount / total * 100) + '%';
+  $('r1b-count').textContent = s.doneCount + ' / ' + total + ' merges';
+  const nx = $('r1b-next');
+  nx.style.visibility = (done && rv == null) ? 'visible' : 'hidden';
+  nx.disabled = !done;
+  $('r1b-nextlabel').textContent = 'Replay';
+  $('r1b-back').disabled = !((s.phase === 'ask' || done) && (rv != null || s.lastDone != null));
   box.querySelectorAll('.chip').forEach(c =>
-    c.addEventListener('pointerup', () => tapChipB(parseInt(c.dataset.i, 10), c)));
+    c.addEventListener('pointerup', () => tapChipB(parseInt(c.dataset.i, 10))));
+  $('r1b-prompt').querySelectorAll('.wbtn').forEach(b =>
+    b.addEventListener('click', () => b.dataset.w === 'retry' ? tryAgain(r1b, 'b') : skipLater(r1b, 'b')));
 }
-function tapChipB(i, elc){
+function tapChipB(i){
   const s = r1b, W = WORDS[s.word];
-  if(s.phase !== 'ask' || s.round >= W.merges.length) return;
+  if(s.phase !== 'ask' || s.reviewing != null) return;
+  const r = cur(s);
+  if(r == null || r >= W.merges.length) return;
   ensureAudio();
-  if(!s.sel.length){ s.sel = [i]; s._tryagain = false; renderR1B(); return; }
+  if(!s.sel.length){ s.sel = [i]; renderR1B(); return; }
   const a = s.sel[0];
   if(a === i){ s.sel = []; renderR1B(); return; }
+  clearQT(s);
   const lo = Math.min(a,i), hi = Math.max(a,i);
-  const parts = W.rounds[s.round], m = W.merges[s.round];
+  const parts = W.rounds[r], m = W.merges[r];
   const ok = (hi === lo + 1) && (parts[lo] + parts[hi] === m.merged);
   if(ok){
-    s.streak++; s.phase = 'done'; s.sel = []; s._tryagain = false;
+    if(s.firstTry){ s.streak++; s.best = Math.max(s.best, s.streak); }
+    s.doneCount++; s.lastDone = r;
+    s.phase = 'reveal'; s.sel = [];
     sfx.good(); setTimeout(() => sfx.merge(), 90);
+    renderR1B();
+    s._timer = setTimeout(() => autoNext(s, 'b'), 1800);
   } else {
-    s.streak = 0; s.sel = []; s._tryagain = true;
+    s.streak = 0; s.firstTry = false; s.sel = [];
+    s.phase = 'wrong';
     sfx.bad();
+    renderR1B();
     const box = $('r1b-chips');
     box.classList.remove('shake'); void box.offsetWidth; box.classList.add('shake');
   }
-  renderR1B();
 }
 
 /* ---------- no-move rule: pin every region to its tallest state ----------
@@ -661,12 +769,19 @@ function stabilizeR1(){
         mhC = Math.max(mhC, pc.offsetHeight);
         mhP = Math.max(mhP, pp.offsetHeight);
         mhCap = Math.max(mhCap, cc.offsetHeight);
-        /* done state (mid-word) */
+        /* reveal state (correct — auto-advancing) */
         if(!done){
           const m = W.merges[r];
           pc.innerHTML = chipsHTML(W.rounds[r+1], mergedIdx(w, r), false, null);
-          pp.innerHTML = '<p class="result bad">Not quite — “' + esc(m.merged) + '” (rank #' + m.rank.toLocaleString() + ') merges next. Streak reset.</p>';
+          pp.innerHTML = '<p class="result good">Correct — “' + esc(m.merged) + '” it is. Streak 9.</p><p class="autonext">next question…</p>';
           cc.innerHTML = m.note;
+          mhC = Math.max(mhC, pc.offsetHeight);
+          mhP = Math.max(mhP, pp.offsetHeight);
+          mhCap = Math.max(mhCap, cc.offsetHeight);
+          /* wrong state (try-again / skip-for-later) */
+          pc.innerHTML = chipsHTML(W.rounds[r], -1, v === 'b', null);
+          pp.innerHTML = wrongPromptHTML();
+          cc.innerHTML = askCaption(w);
           mhC = Math.max(mhC, pc.offsetHeight);
           mhP = Math.max(mhP, pp.offsetHeight);
           mhCap = Math.max(mhCap, cc.offsetHeight);
@@ -682,19 +797,27 @@ function stabilizeR1(){
 let stabT = null;
 window.addEventListener('resize', () => { clearTimeout(stabT); stabT = setTimeout(stabilizeR1, 150); });
 
-/* keyboard: 1/2/3 for variant A choices, arrows for next/back */
+/* keyboard: 1/2/3 for variant A choices, T/S on a wrong answer,
+   arrows for back / advance-now during the reveal pause */
 document.addEventListener('keydown', e => {
   const t = e.target;
   if(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
   const aVis = !$('r1a').classList.contains('hidden');
   const s = aVis ? r1a : r1b, v = aVis ? 'a' : 'b';
+  const nextBtn = v === 'a' ? $('r1a-next') : $('r1b-next');
+  const backBtn = v === 'a' ? $('r1a-back') : $('r1b-back');
   if(aVis && s.phase === 'ask' && ['1','2','3'].includes(e.key)){
     const i = parseInt(e.key, 10) - 1;
     if(s._cands && s._cands[i]) pickA(i);
     return;
   }
-  if(e.key === 'ArrowRight' && !(v === 'a' ? $('r1a-next') : $('r1b-next')).disabled) nextR1(s, v);
-  else if(e.key === 'ArrowLeft' && !(v === 'a' ? $('r1a-back') : $('r1b-back')).disabled) backR1(s, v);
+  if(s.phase === 'wrong' && (e.key === 't' || e.key === 'T')){ tryAgain(s, v); return; }
+  if(s.phase === 'wrong' && (e.key === 's' || e.key === 'S')){ skipLater(s, v); return; }
+  if(e.key === 'ArrowRight'){
+    if(s.phase === 'reveal') autoNext(s, v);
+    else if(!nextBtn.disabled) nextR1(s, v);
+  }
+  else if(e.key === 'ArrowLeft' && !backBtn.disabled) backR1(s, v);
 });
 
 /* sound toggle */
@@ -1014,6 +1137,7 @@ function renderR3B(){
 bindPress($('r3b-reset'), () => { r3b = {path: [], tried: []}; renderR3B(); });
 
 /* ================= init ================= */
+initQuiz(r1a); initQuiz(r1b);
 renderR1A();
 renderR1B();
 renderR3A();
